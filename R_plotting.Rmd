@@ -1,0 +1,191 @@
+---
+title: "Heatmap plotting"
+output: html_notebook
+---
+```{r}
+library(tidyverse)
+library(scales)
+library(egg)
+```
+Set `data_path` to the directory where you have the API tables and party rating CSV files. This assumes file names have not been modified, in case they have been, adjust accordingly. Set `plot_path` to where you want plots be saved.
+
+```{r}
+data_path = ''
+plot_path = ''
+```
+
+## API plot
+
+Reads API index values and other values from a table and outputs a plot with API values and other values by year.
+
+```{r}
+indices <- read.csv(paste(data_path, 'API_tables2.csv', sep = ''))
+```
+
+```{r}
+to_plot <- indices %>%
+  select(-X) %>%
+  rename('2007' = 'X2007', '2011' = 'X2011', '2015' = 'X2015', '2019' = 'X2019') %>%
+  pivot_wider(everything(), names_from = 'point', values_from = '2007':'2019') %>%
+  pivot_longer(starts_with('2'), names_to = c('year', '.value'), names_pattern = '(.*)_(.*)') %>%
+  #filter(attribute == 'API') %>%
+  mutate(year = as.numeric(year))
+```
+
+```{r}
+first_plot <- to_plot %>% filter(!attribute %in% c('API', 'weighted_API', 'raw_polarization', 'mean AP'))
+
+p1 <- ggplot(data = first_plot, aes(x = year, group = attribute, fill = attribute)) +
+  geom_ribbon(aes(x = year, ymin = low, ymax = up),
+              alpha = 0.3) +
+  geom_line(aes(x = year, y = mean, color = attribute)) +
+  #theme(legend.position = 'bottom') +
+  #scale_fill_brewer(palette = "Set2") +
+  scale_fill_brewer(palette = "Set2", labels = c('Inparty mean',
+                                 'Outparty maximum',
+                                 'Outparty mean',
+                                 'Outparty minimum',
+                                 'Party mean')) +
+  scale_color_brewer(palette = "Set2", labels = c('Inparty mean',
+                                 'Outparty maximum',
+                                 'Outparty mean',
+                                 'Outparty minimum',
+                                 'Party mean')) +
+  theme(legend.title = element_blank()) +
+  ylab('Rating') +
+  xlab('Year') +
+  ylim(c(0,10)) +
+  scale_x_continuous(breaks = c(2007, 2011, 2015, 2019), limits = c(2007, 2019))
+
+second_plot <- to_plot %>% filter(attribute == 'API') 
+
+p2 <- ggplot(data = second_plot, aes(x = year, group = attribute)) +
+  geom_ribbon(data = second_plot, aes(x = year, ymin = low, ymax = up, fill = attribute),
+              alpha = 0.3) +
+  geom_line(aes(x = year, y = mean, group = attribute, color = attribute)) +
+  theme(legend.position = 'none') +
+  ylab('API') +
+  xlab('Year') +
+  scale_x_continuous(breaks = c(2007, 2011, 2015, 2019), limits = c(2007, 2019))
+```
+
+```{r}
+ggsave(paste(plot_path, 'indices.png', sep = ''),
+       ggarrange(p2, p1, ncol = 2), width = 7, height = 3)
+ggsave(paste(plot_path, 'indices.tiff', sep = ''),
+       ggarrange(p2, p1, ncol = 2), width = 7, height = 3, dpi = 300)
+```
+
+## Opinion heatmaps
+
+```{r}
+ops_2007 <- read.csv(paste(data_path, 'opinions_2007.csv', sep = ""))
+ops_2011 <- read.csv(paste(data_path, 'opinions_2011.csv', sep = ""))
+ops_2015 <- read.csv(paste(data_path, 'opinions_2015.csv', sep = ""))
+ops_2019 <- read.csv(paste(data_path, 'opinions_2019.csv', sep = ""))
+```
+
+```{r}
+m1 <- ops_2007 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+m1['year'] = 2007
+
+m2 <- ops_2011 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+m2['year'] = 2011
+
+m3 <- ops_2015 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+m3['year'] = 2015
+
+m4 <- ops_2019 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+m4['year'] = 2019
+
+m_combi <- rbind(m1, m2, m3, m4)
+```
+
+```{r}
+opinion_heatmap <- m_combi %>%
+  ggplot(aes(party, partisan_group, fill = opinion)) +
+    geom_tile() +
+    scale_fill_distiller(name = 'Rating', palette = 'RdBu',
+                         limits = c(0, 10), breaks = c(0, 2.5, 5, 7.5, 10), labels = c('0 (Cold)', '2.5', '5', '7.5', '10 (Warm)')) +
+    geom_text(aes(label = round(opinion, 1))) +
+    theme_minimal() + 
+    facet_wrap(~ year) +
+    ylab('Partisan group') +
+    xlab('Party')
+
+ggsave(paste(plot_path, 'opinion_heatmap.png', sep = ''), width = 7, height = 4, opinion_heatmap)
+ggsave(paste(plot_path, 'opinion_heatmap.tiff', sep = ''), width = 7, height = 4, dpi = 300, opinion_heatmap)
+```
+
+## Distance heatmaps
+
+```{r}
+dists_2007 <- read.csv(paste(data_path, 'distances_2007.csv', sep = ""))
+dists_2011 <- read.csv(paste(data_path, 'distances_2011.csv', sep = ""))
+dists_2015 <- read.csv(paste(data_path, 'distances_2015.csv', sep = ""))
+dists_2019 <- read.csv(paste(data_path, 'distances_2019.csv', sep = ""))
+```
+
+```{r}
+dm1 <- dists_2007 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+dm1['year'] = 2007
+
+dm2 <- dists_2011 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+dm2['year'] = 2011
+
+dm3 <- dists_2015 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+dm3['year'] = 2015
+
+dm4 <- dists_2019 %>%
+  pivot_longer(CD:SPP, names_to = 'party', values_to = "opinion") %>%
+  rename('partisan_group' = 'X') %>%
+  mutate_at(vars(party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+  mutate_at(vars(partisan_group), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL"))))
+dm4['year'] = 2019
+
+dm_combi <- rbind(dm1, dm2, dm3, dm4)
+```
+
+```{r}
+distance_heatmap <- dm_combi %>%
+  ggplot(aes(party, partisan_group, fill = opinion)) +
+    geom_tile() +
+    scale_fill_distiller(name = 'Distance', palette = 'RdBu',
+                         direction = 1, limits = c(0, 10), breaks = c(10, 7.5, 5, 2.5, 0), labels = c('10 (Cold)', '7.5', '5', '2.5', '0 (Warm)')) +
+    geom_text(aes(label = round(opinion, 1))) +
+    theme_minimal() + 
+    facet_wrap(~ year) +
+    ylab('Partisan group') +
+    xlab('Party')
+
+ggsave(paste(plot_path, 'distance_heatmap.png', sep = ''), width = 7, height = 4, distance_heatmap)
+ggsave(paste(plot_path, 'distance_heatmap.tiff', sep = ''), width = 7, height = 4, dpi = 300, distance_heatmap)
+```

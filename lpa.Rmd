@@ -1,0 +1,505 @@
+---
+title: "FNES analysis with LPA"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(tidyLPA)
+library(mclust) # Required for priorControl()
+library(RColorBrewer)
+library(scales)
+library(gridExtra)
+```
+# Setup where you have the data and where you want the plots to be saved
+
+```{r}
+data_path <- ''
+plot_path <- ''
+```
+
+Load data. Let's go through the various filterings transformations:
+* Q22B includes information about the inparty for respondents who have one. The traditional eight parliamentary parties are numbered 1 to 8, so we pick respondents that have named one of them and exclude other possibilities (such as "other" and don't knows).
+* Variables beginning with Q015 contain party thermometers for the eight parliamentary parties. The scale goes from 0 to 10 and numbers above that indicate missing values, so we only select rows with appropriate values. If rating for one of the parties is missing, the response is discarded.
+* own.party is recoded and party thermometer columns renamed with the Finnish shorthands for the parties.
+
+```{r}
+opinions <- read.csv(data_path) %>%
+  dplyr::select(Q22B, starts_with("Q015"), -Q015I, starts_with("K12"), Q18) %>%
+  filter_at(vars(starts_with("Q015")), all_vars(. < 11)) %>% 
+  #rename_at(vars(Q22B, starts_with("Q015")), ~ c("own.party", "SDP", "KOK", "PS", "KESK", "VIHR", "VAS", "RKP", "KD")) %>%
+  rename_at(vars(Q22B, starts_with("Q015")), ~ c("own.party", "SDP", "NCP", "FP", "CPF", "GL", "LA", "SPP", "CD")) %>%
+  mutate(own.party = replace_na(own.party, 100)) %>%
+  #mutate(own.party = recode(own.party, '1' = 'SDP',
+  #     '2' = 'KOK', '3' = 'PS', '4' = 'KESK',
+  #     '5' = 'VIHR', '6' = 'VAS', '7' = 'RKP', '8' = 'KD', '9' = 'Other', '10' = 'Other',
+  #     '97' = 'None', '98' = 'None', '99' = 'None', '100' = 'None')) %>%
+  mutate(own.party = dplyr::recode(own.party, '1' = 'SDP',
+       '2' = 'NCP', '3' = 'FP', '4' = 'CPF',
+       '5' = 'GL', '6' = 'LA', '7' = 'SPP', '8' = 'CD', '9' = 'Other', '10' = 'Other',
+       '97' = 'None', '98' = 'None', '99' = 'None', '100' = 'None')) %>%
+  #mutate(own.party = factor(own.party, levels = c('KD', 'KESK', 'KOK', 'PS', 'RKP', 'SDP', 'VAS', 'VIHR', 'Other', 'None')))
+  mutate(own.party = factor(own.party, levels = c('CD', 'CPF', 'NCP', 'FP', 'SPP', 'SDP', 'LA', 'GL', 'Other', 'None')))
+```
+
+This one sums up the GAL-TAN and left-right dimensions.
+
+```{r}
+values_opinions <- opinions %>%
+  rename(val_market = K12_1, val_multicult = K12_2, val_christ = K12_3, val_reg = K12_4, val_swe = K12_5,
+         val_eq = K12_6, val_pubsec = K12_7, val_sexminor = K12_8, val_tax = K12_9, val_finswe = K12_10, 
+         val_law = K12_11, val_fam = K12_12, val_immig = K12_13, val_incdiff = K12_14, 
+         val_eu = K12_15, val_nuc = K12_16, val_munic = K12_17, val_env = K12_18) %>%
+  #mutate(across(starts_with("val_")), replace_na(5)) %>%
+  mutate(leftright_self = replace(Q18, Q18 > 10, NA)) %>%
+  mutate(galtan = val_christ + val_law + (10 - val_multicult) + (10 - val_sexminor) + val_fam + (10 - val_env)) %>%
+  mutate(leftright_q = val_market + val_pubsec + val_tax + (10 - val_incdiff)) %>%
+  #mutate(leftright_q = val_market + val_pubsec + val_tax) %>%
+  mutate(galtan = rescale(galtan, to = c(0,1))) %>%
+  mutate(leftright_q = rescale(leftright_q, to = c(0,1))) %>%
+  mutate(leftright_self = rescale(leftright_self, to = c(0,1)))
+```
+
+Perform clustering with Mclust. If an rds file with models is already present, one of the blocks that follow this load the models from the file instead. As computing the models takes some time, loading the models from a file is advised.
+
+```{r}
+set.seed(7749)
+
+# Mclust is run with priorControl(), as otherwise many of the
+# models will not converge
+
+models <- opinions %>%
+  dplyr::select(SDP, NCP, FP, CPF, GL, LA, SPP, CD) %>%
+  estimate_profiles(1:8,
+                    models = c(1, 2, 3, 6),
+                    prior = priorControl())
+```
+The next two blocks save the Mclust models to a file, and load models from a file. They're now commented out, just to be safe.
+
+```{r}
+#saveRDS(models, file = '')
+```
+
+```{r}
+#models <- readRDS(file = '')
+```
+
+Compare solutions using BIC and plot. One can easily add more comparison methods by giving them as parameters.
+
+```{r}
+models %>%
+  compare_solutions(statistics = c("BIC"))
+```
+
+```{r}
+bic_plot <- plot(models) + theme_gray()
+ggsave(paste(plot_path, 'bic_plot.png', sep = ''), bic_plot, height = 4, width = 7)
+ggsave(paste(plot_path, 'bic_plot.tiff', sep = ''), bic_plot, height = 4, width = 7, dpi = 300)
+```
+
+#Functions
+
+Setup various functions for presenting results. The `label_plot` parameter, if `TRUE`, labels the plots. In the original publication, this was used in generating plots for the appendix.
+
+First, this plots the empirical distributions of party ratings for the clusters that were discovered. An observation is assigned to the cluster that the model says it has the highest probability of belonging to. 
+
+The like-dislike scores that were observed are than grouped according to cluster membership and plotted.
+
+```{r}
+plot_empirical_distributions <- function(model, label_plot = FALSE) {
+  
+  dist_plot <- model %>%
+    get_data() %>% 
+    dplyr::select(-model_number, -classes_number, -starts_with("CPROB")) %>%
+    mutate(Class = as.factor(Class)) %>%
+    gather(Party, Rating, -Class) %>%
+    mutate_at(vars(Party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+    ggplot(aes(x = Rating, fill = Class)) +
+      geom_density(alpha = 0.8) +
+      scale_x_continuous(breaks = c(0,5,10), labels = c(0,5,10)) +
+      #facet_grid(Class ~ Party, scales = "free_y") +
+      facet_grid(Class ~ Party) +
+      #theme_light() +
+      theme(legend.position = "none",
+            plot.title = element_text(hjust = 0.5)) +
+      scale_fill_brewer(palette = "Set2") +
+      xlab("Rating") +
+      ylab("Density") #+
+  
+  if (label_plot == TRUE) {
+    return(dist_plot + labs(title = "Empirical distributions of like ratings"))
+  }
+    
+  return(dist_plot)
+}
+```
+
+Here we do the same, but instead use the like-dislike distributions that were estimated as part of the modeling. These are normal distributions, so the function generates data with mean and variance given by the model, and this data is then used for plotting.
+
+```{r}
+plot_estimated_distributions <- function(model, label_plot = FALSE) {
+  
+  # Function for generating normally  distributed data with mean and variance given by  the model
+  
+  gennorm <- function(obs) {
+    
+    x <- seq(0, 10, length = 1000)
+    dada <- dnorm(x, mean = as.numeric(obs['Means']), sd <- sqrt(as.numeric(obs['Variances'])))
+    returned <- data.frame(rep(obs['Parameter'], 1000), rep(obs['Class'], 1000), dada)
+    colnames(returned) <- c("Party", "Class", "Rating")
+    return(returned)
+
+  }
+  
+  # Get parameters from the model
+  
+  parameters <- model %>%
+    get_estimates() %>% 
+    subset(Category == "Means" | Category == "Variances") %>% 
+    pivot_wider(id_cols = c(Class, Parameter), names_from = c(Category), values_from = Estimate)
+  
+  # Generate data
+  
+  dists <- apply(parameters, 1, gennorm)
+  dists_df <- do.call(rbind.data.frame, dists) %>%
+    cbind(seq(0, 10, length = 1000))
+  colnames(dists_df) <- c("Party", "Class", "Rating", "x")
+  
+  # Plot generated distributions
+  
+  dist_plot <- dists_df %>% 
+    mutate_at(vars(Party), funs(factor(., levels = c("CD", "CPF", "NCP", "FP", "SPP", "SDP", "LA", "GL")))) %>%
+    #mutate_at(vars(Party), funs(factor(., levels = c("KD", "KESK", "KOK", "PS", "RKP", "SDP", "VAS", "VIHR")))) %>%
+    #mutate_at(vars(Party), funs(factor(., levels = c("VAS", "SDP", "VIHR", "RKP", "KESK", "KOK", "KD", "PS")))) %>%
+    ggplot(aes(x = x, y = Rating, fill = Class)) +
+      geom_area(color = "black", alpha = 0.8) +
+      xlim(0, 10) + 
+      #facet_grid(Class ~ Party, scales = "free_y") +
+      facet_grid(Class ~ Party) +
+      scale_x_continuous(breaks = c(0,5,10), labels = scales::number_format(accuracy = 1)) +
+      #theme_light() +
+      theme(legend.position = "none",
+            plot.title = element_text(hjust = 0.5)) +
+      scale_fill_brewer(palette = "Set2") +
+      xlab("Rating") +
+      ylab("Density") #+
+      #labs(title = "Estimated distributions")
+  
+  if (label_plot == TRUE) {
+    return(dist_plot + labs(title = "Estimated distributions of like ratings"))
+  }
+  
+  return(dist_plot)
+}
+```
+
+The following also take the original data as arguments, as they combine partisan affiliation with cluster membership from a model.
+
+```{r}
+plot_frequencies <- function(model, data, label_plot = FALSE) {
+  
+  modeldata <- get_data(model)
+  freq_table <- as.data.frame(table(data$own.party, modeldata$Class))
+  colnames(freq_table) <- c("Party", "Class", "Frequency")
+  
+  freq_plot <- freq_table %>% 
+    ggplot(aes(x = Party, y = Frequency, fill = Party)) +
+      geom_col(color = "black") +
+      facet_wrap(~ Class) +
+      theme(legend.position = "none", axis.text.x = element_text(angle = 90),
+            plot.title = element_text(hjust = 0.5)) +
+      scale_fill_brewer(palette = "Paired") +
+      ylab('Number of respondents') +
+      xlab('Closest party') #+
+      #labs(title = "Cluster composition")
+  
+  if (label_plot == TRUE) {
+    return(freq_plot + labs(title = "Cluster composition"))
+  }
+  
+  return(freq_plot)
+}
+```
+
+Plot the position of respondents on the GAL-TAN and left-right dimensions. Points are shaped and symbols chosen according to cluster membership and cluster means are marked by larger symbols.
+
+```{r}
+plot_ideologies_by_cluster <- function(model, data, label_plot = FALSE) {
+  
+  modeldata <- get_data(model)
+  
+  df <- cbind(modeldata$Class, data)
+  colnames(df)[1] = 'Cluster'
+  df$Cluster <- as.factor(df$Cluster)
+  
+  means <- df %>%
+    group_by(Cluster) %>%
+    summarise(leftright_q = mean(leftright_q), galtan = mean(galtan))
+  
+  ideol_plot <- df %>%
+    ggplot(aes(x = leftright_q, y = galtan, color = Cluster, fill = Cluster, shape = Cluster)) +
+      geom_jitter(width = 0.01, height = 0.01, alpha = 0.9) +
+      #scale_shape_manual(values = c(15, 16, 17, 23, 25, 8, 3, 4)) + 
+      #scale_shape_manual(values = c(4, 16, 17, 15, 8, 25, 11, 23)) +
+      scale_shape_manual(values = c(21, 22, 23, 24)) +
+      coord_fixed() +
+      xlab("Left-right") +
+      ylab("GAL-TAN") +
+      scale_fill_brewer(palette = "Set2") +
+      scale_color_brewer(palette = "Set2") +
+      geom_point(data = means, size = 5, color = "black") +
+      theme(plot.title = element_text(hjust = 0.5))
+  
+  if (label_plot == TRUE) {
+      return(ideol_plot + labs(title = "Ideology and clusters"))
+  }
+  
+  return(ideol_plot)
+}
+```
+
+This does the same, except that instead of clusters it uses partisan affiliations. This is not actually used in the paper or this notebook, but included here in case it's interesting to examine.
+
+```{r}
+plot_ideologies_by_party <- function(model, data, label_plot = FALSE) {
+  
+  modeldata <- get_data(model)
+  
+  df <- cbind(modeldata$Class, data)
+  colnames(df)[1] = 'Cluster'
+  df$Cluster <- as.factor(df$Cluster)
+  
+  means <- df %>%
+    group_by(own.party) %>%
+    summarise(leftright_q = mean(leftright_q), galtan = mean(galtan))
+  
+  ideol_plot <- df %>%
+    ggplot(aes(x = leftright_q, y = galtan, color = own.party, fill = own.party, shape = own.party)) +
+      geom_jitter(width = 0.01, height = 0.01, alpha = 0.9) +
+      #scale_shape_manual(values = c(15, 16, 17, 23, 25, 8, 3, 4)) + 
+      #scale_shape_manual(values = c(4, 16, 17, 15, 8, 25, 11, 23)) +
+      #scale_shape_manual(values = c(21, 22, 23, 24)) +
+      scale_shape_manual(values = c(21, 22, 23, 24, 25, 3, 4, 8, 11, 13)) +
+      #KD, KESK, KOK, PS, RKP, SDP, VAS, VIHR, OTHER, NONE
+      scale_shape_manual(values = c(8, 11, 13, 25, 4, 24, 23, 22, 3, 21)) +
+      coord_fixed() +
+      xlab("Left-right") +
+      ylab("GAL-TAN") +
+      scale_fill_brewer(palette = "Paired") +
+      scale_color_brewer(palette = "Paired") +
+      geom_point(data = means, size = 5, color = "black") 
+  
+  if (label_plot == TRUE) {
+    return(ideol_plot + labs(title = "Ideology and partisan groups"))
+  }
+  
+  return(ideol_plot)
+}
+```
+
+```{r}
+generate_plots <- function(model, data, ideology_data) {
+
+  p1 <- plot_empirical_distributions(model)
+  p2 <- plot_estimated_distributions(model)
+  p3 <- plot_frequencies(model, data)
+  p4 <- plot_ideologies_by_cluster(model, ideology_data)
+  
+  return(list('emp' = p1, 'est' = p2, 'frew' = p3, 'idclus' = p4))
+}
+```
+
+```{r}
+present_model <- function(model, data, ideology_data) {
+  
+  plots <- generate_plots(model, data, ideology_data)
+  
+  print(plots$emp)
+  
+  print(plots$est)
+  
+  print(plots$freq)
+  
+  print(plots$idclus)
+  
+}
+```
+
+```{r}
+present_model <- function(model, data, ideology_data) {
+  
+  print(plot_frequencies(model, data))
+  
+  print(plot_empirical_distributions(model))
+  
+  print(plot_estimated_distributions(model))
+  
+  print(plot_ideologies_by_cluster(model, ideology_data))
+  
+}
+```
+
+# Present models
+
+Use this to plot models one by one. Includes solutions with 2-4 clusters, also for the two model parameterizations that are not used in the paper.
+
+```{r}
+models$model_1_class_2 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_1_class_3 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_1_class_4 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_2_class_2 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_2_class_3 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_2_class_4 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_3_class_2 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_3_class_3 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_3_class_4 %>% present_model(opinions, values_opinions)
+```
+
+```{r}
+models$model_6_class_2 %>% present_model(opinions, values_opinions)
+```
+
+# Present a version of the model in the paper with a modified cluster order
+
+```{r}
+paper_model <- models$model_1_class_4
+paper_model[['dff']] <- paper_model[['dff']] %>%
+  mutate_at(vars(Class), funs(factor(., levels = c(4, 3, 2, 1), labels = c(1, 2, 3, 4))))
+```
+
+```{r}
+# FOR HEPP PRESENTATION
+
+paper_model <- models$model_1_class_4
+paper_model[['dff']] <- paper_model[['dff']] %>%
+  mutate_at(vars(Class), funs(factor(., levels = c(4, 3, 2, 1), labels = c('Red-green', 'Moderate', 'Bourgeois', 'Dissatisfied'))))
+```
+
+```{r}
+paper_model %>% present_model(opinions, values_opinions)
+```
+
+#  Output plots
+
+The next block saves the plots used in the paper itself at the location specified by `plot_path`. Plots are saved as .PNG and as .TIFF with 300 dpi resolution.
+
+```{r}
+plots <- generate_plots(paper_model, opinions, values_opinions)
+
+p1 <- plots$feq
+p2 <- plots$emp
+p3 <- plots$est
+p4 <- plots$idclus
+
+ggsave(paste(plot_path, 'nonpartisan_papermodel_frequencies_EN.png', sep = ''), p1, height = 4, width = 7)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_frequencies_EN.png', sep = ''), p1, height = 4, width = 7)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_empirical_EN.png', sep = ''), p2, height = 4, width = 7)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_estimated_EN.png', sep = ''), p3, height = 4, width = 7)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_ideology_cluster_EN.png', sep = ''), p4, height = 7, width = 7)
+
+ggsave(paste(plot_path, 'nonpartisan_papermodel_frequencies_EN.tiff', sep = ''), p1, height = 4, width = 7, dpi = 300)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_frequencies_EN.tiff', sep = ''), p1, height = 4, width = 7, dpi = 300)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_empirical_EN.tiff', sep = ''), p2, height = 4, width = 7, dpi = 300)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_estimated_EN.tiff', sep = ''), p3, height = 4, width = 7, dpi = 300)
+ggsave(paste(plot_path, 'nonpartisan_papermodel_ideology_cluster_EN.tiff', sep = ''), p4, height = 7, width = 7, dpi = 300)
+```
+
+A general function for saving plots related to a specified model with a given name.
+
+```{r}
+save_plots <- function(model, data, value_data, plot_path, name) {
+  plots <- generate_plots(model, data, value_data)
+  
+  p1 <- plots$emp
+  p2 <- plots$est
+  p3 <- plots$freq
+  p4 <- plots$idclus
+  
+  p1_name <- paste(name, '_empirical.png', sep = '')
+  p2_name <- paste(name, '_estimated.png', sep = '')
+  p3_name <- paste(name, '_frequencies.png', sep = '')
+  p4_name <- paste(name, '_ideology_cluster.png', sep = '')
+  
+  ggsave(paste(plot_path, p1_name, sep = ''), p1, height = 4, width = 7)
+  ggsave(paste(plot_path, p2_name, sep = ''), p2, height = 4, width = 7)
+  ggsave(paste(plot_path, p3_name, sep = ''), p3, height = 4, width = 7)
+  ggsave(paste(plot_path, p4_name, sep = ''), p4, height = 7, width = 7)
+  
+  p1_name2 <- paste(name, '_empirical.tiff', sep = '')
+  p2_name2 <- paste(name, '_estimated.tiff', sep = '')
+  p3_name2 <- paste(name, '_frequencies.tiff', sep = '')
+  p4_name2 <- paste(name, '_ideology_cluster.tiff', sep = '')
+  
+  ggsave(paste(plot_path, p1_name, sep = ''), p1, height = 4, width = 7, dpi = 300)
+  ggsave(paste(plot_path, p2_name, sep = ''), p2, height = 4, width = 7, dpi = 300)
+  ggsave(paste(plot_path, p3_name, sep = ''), p3, height = 4, width = 7, dpi = 300)
+  ggsave(paste(plot_path, p4_name, sep = ''), p4, height = 7, width = 7, dpi = 300)
+}
+```
+
+Here is the BIC plot:
+
+```{r}
+bic_plot <- plot(models) + theme_gray()
+ggsave(paste(plot_path, '/appendix/bic_plot.png', sep = ''), bic_plot, height = 4, width = 7)
+ggsave(paste(plot_path, '/appendix/bic_plot.tiff', sep = ''), bic_plot, height = 4, width = 7, dpi = 300)
+```
+
+Finally, we'll combine all plots related to a specific model in one figure, as used in the appendix.
+
+```{r}
+create_appendix_grid <- function(model, data, value_data) {
+  p1 <- plot_empirical_distributions(model, label_plot = TRUE)
+  p2 <- plot_estimated_distributions(model, label_plot = TRUE)
+  p3 <- plot_frequencies(model, opinions, label_plot = TRUE)
+  p4 <- plot_ideologies_by_cluster(model, values_opinions, label_plot = TRUE)
+  
+  pgrid <- grid.arrange(p1, p2, p3, p4, layout_matrix = rbind(cbind(1,1,1,1), cbind(2,2,2,2), cbind(3,3,4,4), cbind(3,3,4,4)), heights = c(3.35, 3.35, 1.65, 1.65))
+  
+  return(pgrid)
+}
+```
+
+Then we select the relevant models and output figures.
+
+```{r}
+modelnames <- c('m1c1', 'm1c2', 'm1c3', 'm1c4', 'm2c1', 'm2c2', 'm2c3', 'm2c4')
+selection_vector <- c(rep(TRUE, 4), rep(FALSE, 4), rep(TRUE, 4), rep(FALSE, 4), rep(FALSE, 16))
+selected_models <- models[selection_vector]
+
+for (i in 1:8) {
+  modelname <- modelnames[[i]]
+  plot_name1 <- paste('/appendix/', modelname, '.png', sep = '')
+  plot_name2 <- paste('/appendix/', modelname, '.tiff', sep = '')
+  sel_model <- selected_models[[i]]
+  plot_grid <- create_appendix_grid(sel_model, opinions, values_opinions)
+  
+  ggsave(paste(plot_path, plot_name1, sep = ''), plot_grid, width = 21, height = 29, units = 'cm')
+  ggsave(paste(plot_path, plot_name2, sep = ''), plot_grid, width = 21, height = 29, units = 'cm', dpi = 300)
+}
+```
+
